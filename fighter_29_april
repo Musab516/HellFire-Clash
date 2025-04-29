@@ -1,0 +1,699 @@
+#include <SFML/Graphics.hpp>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <random>
+
+// Game Constants
+const int WINDOW_WIDTH = 800;
+const int WINDOW_HEIGHT = 600;
+const float FRAME_RATE = 60.0f;
+const float GRAVITY = 0.6f;
+const float JUMP_FORCE = -12.0f;
+const float BASE_SPEED = 3.0f;
+const float SPRINT_MULTIPLIER = 1.5f;
+const float ATTACK_COOLDOWN = 0.5f;
+const float HURT_DURATION = 0.5f;
+const float AI_DECISION_INTERVAL = 0.3f;
+const float ATTACK_RANGE = 100.0f;
+const float JUMP_RANGE = 150.0f;
+const float BACKGROUND_FRAME_DELAY = 0.11f;
+
+// Animation Frame Counts
+const int IDLE_FRAMES = 6;
+const int RUN_FRAMES = 8;
+const int JUMP_FRAMES = 10;
+const int ATTACK1_FRAMES = 4;
+const int ATTACK2_FRAMES = 3;
+const int ATTACK3_FRAMES = 4;
+const int SHIELD_FRAMES = 2;
+const int HURT_FRAMES = 3;
+const int DEAD_FRAMES = 3;
+const int BACKGROUND_FRAMES = 8;
+
+enum ActionState {
+    IDLE,
+    RUN,
+    JUMP,
+    ATTACK1,
+    ATTACK2,
+    ATTACK3,
+    SHIELD,
+    HURT,
+    DEAD
+};
+
+enum FacingDirection {
+    LEFT,
+    RIGHT
+};
+
+class Character {
+private:
+    sf::Sprite sprite;
+    std::vector<sf::Texture> textures;
+    ActionState currentState;
+    FacingDirection facing;
+    int currentFrame;
+    float animTimer;
+    float attackCooldown;
+    float hurtTimer;
+    sf::Vector2f velocity;
+    float health;
+    float maxHealth;
+    bool isGrounded;
+    bool isAttacking;
+    bool isShielding;
+    bool isHurting;
+    bool isAlive;
+    float scale;
+    float attackDamage;
+    float movementSpeed;
+    sf::Clock stateClock;
+
+    // Animation speeds
+    const float IDLE_SPEED = 0.15f;
+    const float RUN_SPEED = 0.08f;
+    const float JUMP_SPEED = 0.1f;
+    const float ATTACK_SPEED = 0.1f;
+    const float SHIELD_SPEED = 0.15f;
+    const float HURT_SPEED = 0.2f;
+    const float DEAD_SPEED = 0.3f;
+
+    void updateAnimation(float deltaTime) {
+        animTimer += deltaTime;
+        int frameCount = 0;
+        float animSpeed = 0.0f;
+        int textureIndex = 0;
+
+        // Determine animation parameters
+        switch (currentState) {
+            case IDLE:
+                frameCount = IDLE_FRAMES;
+                animSpeed = IDLE_SPEED;
+                textureIndex = 0;
+                break;
+            case RUN:
+                frameCount = RUN_FRAMES;
+                animSpeed = RUN_SPEED;
+                textureIndex = 1;
+                break;
+            case JUMP:
+                frameCount = JUMP_FRAMES;
+                animSpeed = JUMP_SPEED;
+                textureIndex = 2;
+                break;
+            case ATTACK1:
+                frameCount = ATTACK1_FRAMES;
+                animSpeed = ATTACK_SPEED;
+                textureIndex = 3;
+                break;
+            case ATTACK2:
+                frameCount = ATTACK2_FRAMES;
+                animSpeed = ATTACK_SPEED;
+                textureIndex = 4;
+                break;
+            case ATTACK3:
+                frameCount = ATTACK3_FRAMES;
+                animSpeed = ATTACK_SPEED;
+                textureIndex = 5;
+                break;
+            case SHIELD:
+                frameCount = SHIELD_FRAMES;
+                animSpeed = SHIELD_SPEED;
+                textureIndex = 6;
+                break;
+            case HURT:
+                frameCount = HURT_FRAMES;
+                animSpeed = HURT_SPEED;
+                textureIndex = 7;
+                break;
+            case DEAD:
+                frameCount = DEAD_FRAMES;
+                animSpeed = DEAD_SPEED;
+                textureIndex = 8;
+                break;
+        }
+
+        // Advance animation frame
+        if (animTimer >= animSpeed) {
+            animTimer = 0.0f;
+            currentFrame++;
+
+            // Handle animation completion
+            if (currentFrame >= frameCount) {
+                if (currentState == DEAD) {
+                    currentFrame = frameCount - 1;
+                } else if (currentState == HURT) {
+                    isHurting = false;
+                    currentState = IDLE;
+                    currentFrame = 0;
+                } else if (isAttacking) {
+                    isAttacking = false;
+                    currentState = IDLE;
+                    currentFrame = 0;
+                } else if (isShielding) {
+                    isShielding = false;
+                    currentState = IDLE;
+                    currentFrame = 0;
+                } else {
+                    currentFrame = 0;
+                }
+            }
+        }
+
+        // Update sprite texture and frame
+        int frameWidth = textures[textureIndex].getSize().x / frameCount;
+        int frameHeight = textures[textureIndex].getSize().y;
+        sprite.setTexture(textures[textureIndex]);
+        sprite.setTextureRect(sf::IntRect(currentFrame * frameWidth, 0, frameWidth, frameHeight));
+        
+        // Update facing direction
+        sprite.setScale(facing == RIGHT ? scale : -scale, scale);
+        sprite.setOrigin(facing == RIGHT ? 0 : sprite.getLocalBounds().width, 0);
+    }
+
+public:
+    Character(bool isPlayer, float startX) {
+        scale = 1.5f;
+        currentState = IDLE;
+        facing = isPlayer ? RIGHT : LEFT;
+        currentFrame = 0;
+        animTimer = 0.0f;
+        attackCooldown = 0.0f;
+        hurtTimer = 0.0f;
+        velocity = sf::Vector2f(0.0f, 0.0f);
+        maxHealth = 300.0f;  // Increased health for longer battles
+        health = maxHealth;
+        isGrounded = true;
+        isAttacking = false;
+        isShielding = false;
+        isHurting = false;
+        isAlive = true;
+        attackDamage = 15.0f;  // Balanced damage
+        movementSpeed = BASE_SPEED;
+
+        // Load textures
+        textures.resize(9);
+        if (!textures[0].loadFromFile("Idle.png") ||
+            !textures[1].loadFromFile("Run.png") ||
+            !textures[2].loadFromFile("Jump.png") ||
+            !textures[3].loadFromFile("Attack_1.png") ||
+            !textures[4].loadFromFile("Attack_2.png") ||
+            !textures[5].loadFromFile("Attack_3.png") ||
+            !textures[6].loadFromFile("Shield.png") ||
+            !textures[7].loadFromFile("Hurt.png") ||
+            !textures[8].loadFromFile("Dead.png")) {
+            std::cerr << "Failed to load character textures!" << std::endl;
+        }
+
+        sprite.setTexture(textures[0]);
+        sprite.setScale(scale, scale);
+        sprite.setPosition(startX, WINDOW_HEIGHT - sprite.getGlobalBounds().height - 20.0f);
+    }
+
+    void update(float deltaTime) {
+        if (!isAlive) return;
+
+        // Update cooldowns
+        if (attackCooldown > 0) attackCooldown -= deltaTime;
+        if (isHurting) hurtTimer -= deltaTime;
+
+        // Apply gravity
+        if (!isGrounded) {
+            velocity.y += GRAVITY;
+            sprite.move(0, velocity.y);
+            
+            // Check if landed
+            if (sprite.getPosition().y >= WINDOW_HEIGHT - sprite.getGlobalBounds().height - 20.0f) {
+                sprite.setPosition(sprite.getPosition().x, WINDOW_HEIGHT - sprite.getGlobalBounds().height - 20.0f);
+                isGrounded = true;
+                velocity.y = 0.0f;
+                if (!isAttacking && !isShielding && !isHurting) {
+                    currentState = IDLE;
+                    stateClock.restart();
+                }
+            }
+        }
+
+        // Update animation
+        updateAnimation(deltaTime);
+
+        // Keep character in bounds
+        sf::FloatRect bounds = sprite.getGlobalBounds();
+        if (bounds.left < 0) sprite.setPosition(0, sprite.getPosition().y);
+        if (bounds.left + bounds.width > WINDOW_WIDTH) {
+            sprite.setPosition(WINDOW_WIDTH - bounds.width, sprite.getPosition().y);
+        }
+    }
+
+    void move(float direction) {
+        if (!isAlive || isAttacking || isHurting) return;
+        
+        // Calculate actual movement
+        float moveAmount = direction * movementSpeed;
+        sprite.move(moveAmount, 0);
+        
+        // Update facing direction
+        if (direction > 0) facing = RIGHT;
+        else if (direction < 0) facing = LEFT;
+        
+        // Set animation state
+        if (!isGrounded) {
+            currentState = JUMP;
+        } else if (direction != 0) {
+            currentState = RUN;
+            stateClock.restart();
+        } else if (stateClock.getElapsedTime().asSeconds() > 0.1f) {
+            currentState = IDLE;
+        }
+    }
+
+    void jump() {
+        if (!isAlive || !isGrounded || isAttacking || isHurting) return;
+        
+        isGrounded = false;
+        velocity.y = JUMP_FORCE;
+        currentState = JUMP;
+        currentFrame = 0;
+        animTimer = 0.0f;
+        stateClock.restart();
+    }
+
+    void attack(int attackType) {
+        if (!isAlive || isAttacking || attackCooldown > 0 || isHurting) return;
+        
+        isAttacking = true;
+        attackCooldown = ATTACK_COOLDOWN;
+        
+        switch (attackType) {
+            case 1: currentState = ATTACK1; break;
+            case 2: currentState = ATTACK2; break;
+            case 3: currentState = ATTACK3; break;
+        }
+        
+        currentFrame = 0;
+        animTimer = 0.0f;
+        stateClock.restart();
+    }
+
+    void shield() {
+        if (!isAlive || isAttacking || isHurting) return;
+        
+        isShielding = true;
+        currentState = SHIELD;
+        currentFrame = 0;
+        animTimer = 0.0f;
+        stateClock.restart();
+    }
+
+    void takeDamage(float amount) {
+        if (!isAlive || isShielding) return;
+        
+        health -= amount;
+        isHurting = true;
+        hurtTimer = HURT_DURATION;
+        currentState = HURT;
+        currentFrame = 0;
+        animTimer = 0.0f;
+        stateClock.restart();
+        
+        if (health <= 0) {
+            health = 0;
+            die();
+        }
+    }
+
+    void die() {
+        isAlive = false;
+        currentState = DEAD;
+        currentFrame = 0;
+        animTimer = 0.0f;
+    }
+
+    void setMovementSpeed(float speed) { movementSpeed = speed; }
+
+    // Getters
+    const sf::Sprite& getSprite() const { return sprite; }
+    float getHealth() const { return health; }
+    float getMaxHealth() const { return maxHealth; }
+    bool isAliveNow() const { return isAlive; }
+    ActionState getCurrentState() const { return currentState; }
+    bool isAttackingNow() const { return isAttacking; }
+    bool isShieldingNow() const { return isShielding; }
+    bool isHurtingNow() const { return isHurting; }
+    FacingDirection getFacing() const { return facing; }
+    float getAttackDamage() const { return attackDamage; }
+    sf::FloatRect getGlobalBounds() const { return sprite.getGlobalBounds(); }
+    sf::Vector2f getPosition() const { return sprite.getPosition(); }
+    bool isGroundedNow() const { return isGrounded; }
+};
+
+class AI {
+private:
+    Character& enemy;
+    const Character& player;
+    float decisionTimer;
+    std::mt19937 rng;
+    float reactionTime;
+    float aggressionLevel;
+
+public:
+    AI(Character& enemy, const Character& player) : 
+        enemy(enemy), player(player), rng(std::random_device()()) {
+        decisionTimer = 0.0f;
+        reactionTime = 0.2f;
+        aggressionLevel = 0.7f; // 0-1, higher = more aggressive
+    }
+
+    void update(float deltaTime) {
+        if (!enemy.isAliveNow()) return;
+
+        decisionTimer += deltaTime;
+
+        // Make decisions at intervals
+        if (decisionTimer >= AI_DECISION_INTERVAL) {
+            decisionTimer = 0.0f;
+            makeDecision();
+        }
+
+        // Keep enemy in bounds
+        sf::FloatRect bounds = enemy.getGlobalBounds();
+        if (bounds.left < 0) enemy.move(1);
+        if (bounds.left + bounds.width > WINDOW_WIDTH) enemy.move(-1);
+    }
+
+private:
+    void makeDecision() {
+        // Calculate distance to player
+        float distance = std::abs(enemy.getPosition().x - player.getPosition().x);
+        
+        // Random number generator for AI decisions
+        std::uniform_real_distribution<float> dist(0.0f, 1.0f);
+        float randVal = dist(rng);
+
+        // If player is attacking, chance to block based on reaction time
+        if (player.isAttackingNow() && distance < ATTACK_RANGE * 1.5f && 
+            randVal < (aggressionLevel + reactionTime)) {
+            enemy.shield();
+            return;
+        }
+
+        // If close enough, attack with probability based on aggression
+        if (distance < ATTACK_RANGE && randVal < aggressionLevel) {
+            // Choose random attack type
+            int attackType = static_cast<int>(dist(rng) * 3) + 1;
+            enemy.attack(attackType);
+            return;
+        }
+
+        // If at medium range, consider jumping
+        if (distance < JUMP_RANGE && distance > ATTACK_RANGE && 
+            randVal < aggressionLevel * 0.6f && enemy.isGroundedNow()) {
+            enemy.jump();
+            return;
+        }
+
+        // Move toward player with some randomness
+        float direction = player.getPosition().x < enemy.getPosition().x ? -1.0f : 1.0f;
+        
+        // Add some randomness to movement
+        if (randVal < 0.1f) direction = 0; // Pause briefly
+        enemy.move(direction);
+    }
+};
+
+class Background {
+private:
+    std::vector<sf::Texture> frames;
+    sf::Sprite currentFrame;
+    int currentIndex;
+    float timer;
+
+public:
+    Background() : currentIndex(0), timer(0.0f) {
+        // Load background frames
+        frames.resize(BACKGROUND_FRAMES);
+        for (int i = 0; i < BACKGROUND_FRAMES; ++i) {
+            std::string filename = "frame_" + std::to_string(i) + "_delay-0.11s.png";
+            if (!frames[i].loadFromFile(filename)) {
+                std::cerr << "Failed to load background frame: " << filename << std::endl;
+            }
+        }
+        
+        currentFrame.setTexture(frames[0]);
+        currentFrame.setScale(
+            WINDOW_WIDTH / currentFrame.getLocalBounds().width,
+            WINDOW_HEIGHT / currentFrame.getLocalBounds().height
+        );
+    }
+
+    void update(float deltaTime) {
+        timer += deltaTime;
+        if (timer >= BACKGROUND_FRAME_DELAY) {
+            timer = 0.0f;
+            currentIndex = (currentIndex + 1) % BACKGROUND_FRAMES;
+            currentFrame.setTexture(frames[currentIndex]);
+        }
+    }
+
+    void draw(sf::RenderWindow& window) {
+        window.draw(currentFrame);
+    }
+};
+
+class HealthBar {
+private:
+    sf::RectangleShape background;
+    sf::RectangleShape healthBar;
+    sf::Vector2f position;
+    sf::Vector2f size;
+    float maxHealth;
+    bool isPlayer;
+
+public:
+    HealthBar(float maxHealth, bool isPlayer) : maxHealth(maxHealth), isPlayer(isPlayer) {
+        size = sf::Vector2f(200.0f, 20.0f);
+        position = isPlayer ? sf::Vector2f(20.0f, 20.0f) : 
+                             sf::Vector2f(WINDOW_WIDTH - size.x - 20.0f, 20.0f);
+        
+        background.setSize(size);
+        background.setFillColor(sf::Color(50, 50, 50));
+        background.setPosition(position);
+        
+        healthBar.setSize(size);
+        healthBar.setFillColor(isPlayer ? sf::Color::Green : sf::Color::Red);
+        healthBar.setPosition(position);
+    }
+
+    void update(float currentHealth) {
+        float healthRatio = currentHealth / maxHealth;
+        if (healthRatio < 0) healthRatio = 0;
+        
+        sf::Vector2f newSize(size.x * healthRatio, size.y);
+        healthBar.setSize(newSize);
+        
+        // Change color based on health
+        if (healthRatio < 0.3f) {
+            healthBar.setFillColor(isPlayer ? sf::Color(255, 69, 0) : sf::Color(255, 69, 0)); // Orange-Red
+        } else if (healthRatio < 0.6f) {
+            healthBar.setFillColor(isPlayer ? sf::Color(255, 215, 0) : sf::Color(255, 140, 0)); // Gold/Orange
+        } else {
+            healthBar.setFillColor(isPlayer ? sf::Color::Green : sf::Color::Red);
+        }
+    }
+
+    void draw(sf::RenderWindow& window) {
+        window.draw(background);
+        window.draw(healthBar);
+    }
+};
+
+class Game {
+private:
+    sf::RenderWindow window;
+    Background background;
+    Character player;
+    Character enemy;
+    AI enemyAI;
+    HealthBar playerHealthBar;
+    HealthBar enemyHealthBar;
+    sf::Font font;
+    bool gameOver;
+
+public:
+    Game() : 
+        window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "2D Fighter Game"),
+        player(true, WINDOW_WIDTH / 4),
+        enemy(false, WINDOW_WIDTH * 3 / 4),
+        enemyAI(enemy, player),
+        playerHealthBar(player.getMaxHealth(), true),
+        enemyHealthBar(enemy.getMaxHealth(), false) {
+        
+        window.setFramerateLimit(static_cast<unsigned int>(FRAME_RATE));
+        
+        if (!font.loadFromFile("ariblk.ttf")) {
+            std::cerr << "Failed to load font!" << std::endl;
+        }
+        
+        gameOver = false;
+    }
+
+    void run() {
+        sf::Clock clock;
+        
+        while (window.isOpen()) {
+            sf::Event event;
+            while (window.pollEvent(event)) {
+                if (event.type == sf::Event::Closed)
+                    window.close();
+                else if (event.type == sf::Event::KeyPressed && gameOver) {
+                    if (event.key.code == sf::Keyboard::R) {
+                       // restartGame();
+                    }
+                }
+            }
+
+            float deltaTime = clock.restart().asSeconds();
+            
+            if (!gameOver) {
+                handleInput();
+                update(deltaTime);
+                checkCollisions();
+            }
+            
+            render();
+        }
+    }
+
+private:
+    void handleInput() {
+        if (!player.isAliveNow() || !enemy.isAliveNow()) {
+            gameOver = true;
+            return;
+        }
+
+        bool isMoving = false;
+        float direction = 0.0f;
+
+        // Movement controls
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left)) {
+            direction = -1.0f;
+            isMoving = true;
+        }
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right)) {
+            direction = 1.0f;
+            isMoving = true;
+        }
+
+        // Sprint modifier
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::LShift)) {
+            player.setMovementSpeed(BASE_SPEED * SPRINT_MULTIPLIER);
+        } else {
+            player.setMovementSpeed(BASE_SPEED);
+        }
+
+        if (isMoving) {
+            player.move(direction);
+        } else if (player.isGroundedNow()) {
+            // Only set to idle if on ground
+            player.move(0);
+        }
+
+        // Action controls
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space)) {
+            player.jump();
+        }
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::X)) {
+            player.attack(1);
+        }
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::V)) {
+            player.attack(2);
+        }
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Z)) {
+            player.attack(3);
+        }
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::C)) {
+            player.shield();
+        }
+    }
+
+    void update(float deltaTime) {
+        background.update(deltaTime);
+        player.update(deltaTime);
+        enemy.update(deltaTime);
+        enemyAI.update(deltaTime);
+        
+        playerHealthBar.update(player.getHealth());
+        enemyHealthBar.update(enemy.getHealth());
+    }
+
+    void checkCollisions() {
+        // Simple attack collision detection
+        if (player.isAttackingNow() && 
+            player.getGlobalBounds().intersects(enemy.getGlobalBounds())) {
+            enemy.takeDamage(player.getAttackDamage());
+        }
+        
+        if (enemy.isAttackingNow() && 
+            enemy.getGlobalBounds().intersects(player.getGlobalBounds())) {
+            player.takeDamage(enemy.getAttackDamage());
+        }
+    }
+
+    void render() {
+        window.clear();
+        background.draw(window);
+        window.draw(player.getSprite());
+        window.draw(enemy.getSprite());
+        playerHealthBar.draw(window);
+        enemyHealthBar.draw(window);
+        
+        if (gameOver) {
+            drawGameOverScreen();
+        }
+        
+        window.display();
+    }
+
+    void drawGameOverScreen() {
+        sf::Text gameOverText;
+        gameOverText.setFont(font);
+        gameOverText.setString(player.isAliveNow() ? "You Win!" : "Game Over");
+        gameOverText.setCharacterSize(50);
+        gameOverText.setFillColor(sf::Color::Red);
+        gameOverText.setStyle(sf::Text::Bold);
+        gameOverText.setPosition(
+            WINDOW_WIDTH / 2 - gameOverText.getLocalBounds().width / 2,
+            WINDOW_HEIGHT / 2 - gameOverText.getLocalBounds().height / 2
+        );
+        window.draw(gameOverText);
+        
+        sf::Text restartText;
+        restartText.setFont(font);
+        restartText.setString("Press R to restart");
+        restartText.setCharacterSize(30);
+        restartText.setFillColor(sf::Color::White);
+        restartText.setPosition(
+            WINDOW_WIDTH / 2 - restartText.getLocalBounds().width / 2,
+            WINDOW_HEIGHT / 2 + 50
+        );
+        window.draw(restartText);
+    }
+
+    // void restartGame() {
+    //     player = Character(true, WINDOW_WIDTH / 4);
+    //     enemy = Character(false, WINDOW_WIDTH * 3 / 4);
+    //     enemyAI = AI(enemy, player);
+    //     playerHealthBar = HealthBar(player.getMaxHealth(), true);
+    //     enemyHealthBar = HealthBar(enemy.getMaxHealth(), false);
+    //     gameOver = false;
+    // }
+};
+
+int main() {
+    Game game;
+    game.run();
+    return 0;
+}
