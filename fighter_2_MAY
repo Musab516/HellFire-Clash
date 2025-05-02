@@ -1,0 +1,1421 @@
+#include <SFML/Graphics.hpp>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cmath>
+#include <memory> // For std::unique_ptr, std::make_unique
+#include <map>
+#include <stdexcept> // For std::runtime_error
+#include <algorithm> // For std::max, std::min
+
+// Forward declaration
+class Game;
+class GameState;
+class MainMenuState;
+class NameInputState;
+class MapSelectionState;
+class GamePlayState;
+class PauseState;
+
+// --- Constants ---
+const int WINDOW_WIDTH = 1280;
+const int WINDOW_HEIGHT = 720;
+const unsigned int FRAME_RATE_LIMIT = 60;
+
+// Background Animation Constants
+const int MAP1_FRAME_COUNT = 8;
+const int MAP2_FRAME_COUNT = 7;
+const float BG_FRAME_DELAY = 0.11f;
+
+// Character Animation Constants (Frame Counts)
+const int IDLE_FRAMES = 6;
+const int RUN_FRAMES = 8;
+const int JUMP_FRAMES = 10;
+const int ATTACK1_FRAMES = 4;
+const int ATTACK2_FRAMES = 3;
+const int ATTACK3_FRAMES = 4;
+const int SHIELD_FRAMES = 2;
+
+// Character Animation Constants (Frame Durations - seconds)
+const float IDLE_SPEED = 0.15f;
+const float RUN_SPEED = 0.08f;
+const float JUMP_SPEED = 0.1f;
+const float ATTACK_SPEED = 0.1f; // Also used for shield animation speed
+
+// --- ResourceManager ---
+class ResourceManager {
+public:
+    sf::Font font;
+    sf::Texture menuBackgroundTexture;
+
+    void loadResources() {
+        if (!font.loadFromFile("ariblk.ttf")) {
+            throw std::runtime_error("Failed to load font: ariblk.ttf");
+        }
+        std::cout << "Font loaded successfully." << std::endl;
+
+        if (!menuBackgroundTexture.loadFromFile("hellfire.png")) {
+            throw std::runtime_error("Failed to load menu background: hellfire.png");
+        }
+        std::cout << "Menu background loaded successfully." << std::endl;
+    }
+};
+
+// --- Character ---
+
+// Enum for different character actions/states
+enum class ActionState {
+    IDLE,
+    RUN,
+    JUMP,
+    ATTACK1,
+    ATTACK2,
+    ATTACK3,
+    SHIELD
+};
+
+// Struct to hold data for each animation
+struct AnimationData {
+    sf::Texture* texture = nullptr;
+    int frameCount = 0;
+    float frameDuration = 0.0f;
+    int frameWidth = 0;
+    int frameHeight = 0;
+};
+
+class Character {
+public:
+    Character() :
+        currentAction(ActionState::IDLE),
+        scale(2.5f),
+        baseSpeed(350.0f), // Pixels per second
+        jumpSpeed(-550.0f),// Pixels per second
+        gravity(1200.0f), // Pixels per second squared
+        verticalVelocity(0.0f),
+        groundY(0.0f), // Will be set based on window size
+        facingRight(true),
+        isJumping(false),
+        isAttacking(false),
+        isShielding(false),
+        canAttack(true),
+        currentFrame(0),
+        animationTimer(sf::Time::Zero)
+    {
+        try {
+            loadTextures();
+            initializeAnimationData(); // Must be called after loading textures
+        } catch (const std::runtime_error& e) {
+            std::cerr << "Character Error: " << e.what() << std::endl;
+            // Handle error appropriately - maybe set a flag?
+            throw; // Re-throw to be caught by Game constructor perhaps
+        }
+
+        sprite.setTexture(idleTexture); // Start with idle
+        sprite.setScale(scale, scale);
+
+        // Initial texture rect setup
+        if (animations.count(ActionState::IDLE) > 0) {
+            const auto& idleData = animations.at(ActionState::IDLE);
+            sprite.setTextureRect(sf::IntRect(0, 0, idleData.frameWidth, idleData.frameHeight));
+            // Set origin for proper flipping and positioning
+            sprite.setOrigin(idleData.frameWidth / 2.f, idleData.frameHeight / 2.f);
+        } else {
+            std::cerr << "Error: Idle animation data not found after loading!" << std::endl;
+        }
+         // Initial health setup (example)
+        maxHealth = 100.0f;
+        currentHealth = maxHealth;
+    }
+
+    void loadTextures() {
+        if (!idleTexture.loadFromFile("Idle.png")) throw std::runtime_error("Failed to load Idle.png");
+        if (!runTexture.loadFromFile("Run.png")) throw std::runtime_error("Failed to load Run.png");
+        if (!jumpTexture.loadFromFile("Jump.png")) throw std::runtime_error("Failed to load Jump.png");
+        if (!attack1Texture.loadFromFile("Attack_1.png")) throw std::runtime_error("Failed to load Attack_1.png");
+        if (!attack2Texture.loadFromFile("Attack_2.png")) throw std::runtime_error("Failed to load Attack_2.png");
+        if (!attack3Texture.loadFromFile("Attack_3.png")) throw std::runtime_error("Failed to load Attack_3.png");
+        if (!shieldTexture.loadFromFile("Shield.png")) throw std::runtime_error("Failed to load Shield.png");
+        std::cout << "Character textures loaded." << std::endl;
+    }
+
+    void initializeAnimationData() {
+        // Helper lambda
+        auto setupAnim = [&](ActionState state, sf::Texture& tex, int frames, float duration) {
+            animations[state] = {&tex, frames, duration, (int)tex.getSize().x / frames, (int)tex.getSize().y};
+        };
+
+        setupAnim(ActionState::IDLE, idleTexture, IDLE_FRAMES, IDLE_SPEED);
+        setupAnim(ActionState::RUN, runTexture, RUN_FRAMES, RUN_SPEED);
+        setupAnim(ActionState::JUMP, jumpTexture, JUMP_FRAMES, JUMP_SPEED);
+        setupAnim(ActionState::ATTACK1, attack1Texture, ATTACK1_FRAMES, ATTACK_SPEED);
+        setupAnim(ActionState::ATTACK2, attack2Texture, ATTACK2_FRAMES, ATTACK_SPEED);
+        setupAnim(ActionState::ATTACK3, attack3Texture, ATTACK3_FRAMES, ATTACK_SPEED);
+        setupAnim(ActionState::SHIELD, shieldTexture, SHIELD_FRAMES, ATTACK_SPEED);
+    }
+
+    void handleInput(const sf::Event& event, sf::Time dt) {
+         // Shielding takes priority
+        if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::C) {
+            isShielding = true;
+        }
+        if (event.type == sf::Event::KeyReleased && event.key.code == sf::Keyboard::C) {
+            isShielding = false;
+        }
+
+        if (isShielding) return; // No other actions while shielding
+
+        // Attacks (only if cooldown ready and not already attacking/jumping)
+        if (canAttack && !isAttacking && !isJumping) {
+            ActionState attackAction = ActionState::IDLE; // Default no attack
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::X)) attackAction = ActionState::ATTACK1;
+            else if (sf::Keyboard::isKeyPressed(sf::Keyboard::V)) attackAction = ActionState::ATTACK2;
+            else if (sf::Keyboard::isKeyPressed(sf::Keyboard::Z)) attackAction = ActionState::ATTACK3;
+
+            if (attackAction != ActionState::IDLE) {
+                isAttacking = true;
+                canAttack = false;
+                currentAction = attackAction;
+                currentFrame = 0;
+                animationTimer = sf::Time::Zero;
+                attackCooldownClock.restart();
+                verticalVelocity = 0; // Stop vertical movement during attack
+            }
+        }
+
+        // Jumping (only if not jumping or attacking)
+        if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space) && !isJumping && !isAttacking) {
+            isJumping = true;
+            verticalVelocity = jumpSpeed;
+            // Action state will be updated in updateActionState
+        }
+    }
+
+    void update(sf::Time dt, const sf::RenderWindow& window) {
+        float dtSeconds = dt.asSeconds();
+        sf::Vector2f movement(0.f, 0.f);
+
+        // Update attack cooldown
+        if (!canAttack && attackCooldownClock.getElapsedTime() >= attackCooldown) {
+            canAttack = true;
+        }
+
+        // Horizontal Movement (only if not attacking or shielding)
+        if (!isAttacking && !isShielding) {
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left)) {
+                movement.x -= baseSpeed * dtSeconds;
+                facingRight = false;
+            }
+            if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right)) {
+                movement.x += baseSpeed * dtSeconds;
+                facingRight = true;
+            }
+        }
+
+        sprite.move(movement);
+        applyPhysics(dt);
+        updateActionState(); // Determine correct state based on flags
+        updateAnimation(dt);
+        keepInBounds(window);
+    }
+
+    void applyPhysics(sf::Time dt) {
+        // Apply gravity if jumping or falling
+        if (isJumping || sprite.getPosition().y < groundY) {
+            // Don't apply gravity if attacking on the ground (looks weird)
+            if (!isAttacking || isJumping) {
+                 verticalVelocity += gravity * dt.asSeconds();
+                 sprite.move(0, verticalVelocity * dt.asSeconds());
+            }
+
+            // Check for landing
+            if (sprite.getPosition().y >= groundY) {
+                sprite.setPosition(sprite.getPosition().x, groundY);
+                isJumping = false;
+                verticalVelocity = 0;
+            }
+        } else {
+             // Ensure snapped to ground if not jumping
+             verticalVelocity = 0;
+             sprite.setPosition(sprite.getPosition().x, groundY);
+        }
+    }
+
+    void updateActionState() {
+        ActionState determinedAction = ActionState::IDLE; // Default state
+
+        if (isShielding) {
+            determinedAction = ActionState::SHIELD;
+        } else if (isAttacking) {
+            // Keep the current attack action until it finishes
+            // (Attack completion logic is in updateAnimation)
+            determinedAction = currentAction; // Stay in the attack state
+        } else if (isJumping) {
+            determinedAction = ActionState::JUMP;
+        } else {
+            // Check movement only if grounded and not doing anything else
+            bool isMovingHorizontally = sf::Keyboard::isKeyPressed(sf::Keyboard::Left) || sf::Keyboard::isKeyPressed(sf::Keyboard::Right);
+            if (isMovingHorizontally) {
+                determinedAction = ActionState::RUN;
+            } else {
+                determinedAction = ActionState::IDLE;
+            }
+        }
+
+        // Transition to the new state only if it's different
+        if (currentAction != determinedAction) {
+            //std::cout << "Changing state from " << static_cast<int>(currentAction) << " to " << static_cast<int>(determinedAction) << std::endl;
+            currentAction = determinedAction;
+            currentFrame = 0; // Reset animation frame on state change
+            animationTimer = sf::Time::Zero; // Reset timer as well
+        }
+    }
+
+
+    void updateAnimation(sf::Time dt) {
+        if (animations.find(currentAction) == animations.end()) {
+            std::cerr << "Warning: Animation data not found for current action!" << std::endl;
+            return; // No animation data
+        }
+
+        const AnimationData& currentAnimData = animations.at(currentAction);
+        if (!currentAnimData.texture || currentAnimData.frameCount <= 0) return; // Invalid data
+
+        animationTimer += dt;
+
+        if (animationTimer.asSeconds() >= currentAnimData.frameDuration) {
+            // Use modulo only if frameDuration is positive to avoid division by zero
+             if (currentAnimData.frameDuration > 0.f) {
+                animationTimer = sf::microseconds(animationTimer.asMicroseconds() % (sf::Int64)(currentAnimData.frameDuration * 1000000.f));
+             } else {
+                animationTimer = sf::Time::Zero; // Reset if duration is zero or negative
+             }
+
+            currentFrame++;
+
+            // Check if attack animation finished
+            if (isAttacking) {
+                if (currentFrame >= currentAnimData.frameCount) {
+                    isAttacking = false;
+                    // currentAction will be updated by updateActionState in the next frame
+                    currentFrame = 0; // Reset frame index for safety
+                }
+            } else {
+                // Loop non-attack animations
+                currentFrame %= currentAnimData.frameCount;
+            }
+        }
+
+        // Update sprite texture and rect
+        if (sprite.getTexture() != currentAnimData.texture) {
+            sprite.setTexture(*currentAnimData.texture);
+        }
+        updateTextureRect();
+    }
+
+    void updateTextureRect() {
+        if (animations.find(currentAction) == animations.end()) return;
+        const AnimationData& animData = animations.at(currentAction);
+        if (!animData.texture || animData.frameCount <= 0) return;
+
+        // Clamp frame index to be safe
+        int frameIdx = std::max(0, std::min(currentFrame, animData.frameCount - 1));
+
+        int rectLeft = frameIdx * animData.frameWidth;
+        int rectTop = 0;
+        int rectWidth = animData.frameWidth;
+        int rectHeight = animData.frameHeight;
+
+        // Ensure origin is set correctly before scaling
+        // This should ideally be consistent across animations or updated if needed
+        sprite.setOrigin(animData.frameWidth / 2.f, animData.frameHeight / 2.f);
+
+        // Apply scale based on direction AFTER setting origin
+        sprite.setScale(facingRight ? scale : -scale, scale);
+
+        sprite.setTextureRect(sf::IntRect(rectLeft, rectTop, rectWidth, rectHeight));
+    }
+
+
+    void keepInBounds(const sf::RenderWindow& window) {
+        sf::FloatRect bounds = sprite.getGlobalBounds(); // Global bounds account for scale/origin
+        float windowWidth = static_cast<float>(window.getSize().x);
+
+        // Calculate visual edges based on position and origin-adjusted width
+        float halfWidth = (sprite.getLocalBounds().width / 2.f) * std::abs(sprite.getScale().x);
+        float currentX = sprite.getPosition().x;
+
+        if (currentX - halfWidth < 0.f) {
+            sprite.setPosition(halfWidth, sprite.getPosition().y);
+        } else if (currentX + halfWidth > windowWidth) {
+            sprite.setPosition(windowWidth - halfWidth, sprite.getPosition().y);
+        }
+    }
+
+    void render(sf::RenderTarget& target) {
+        target.draw(sprite);
+    }
+
+    void reset(const sf::RenderWindow& window) {
+        onResize(window); // Update groundY based on current window size
+        sprite.setPosition(window.getSize().x / 2.f, groundY); // Center horizontally
+        currentAction = ActionState::IDLE;
+        isJumping = false;
+        isAttacking = false;
+        isShielding = false;
+        verticalVelocity = 0.f;
+        facingRight = true;
+        currentFrame = 0;
+        animationTimer = sf::Time::Zero;
+        canAttack = true;
+        currentHealth = maxHealth; // Reset health
+        updateTextureRect(); // Ensure correct initial frame/scale
+    }
+
+    void setPosition(float x, float y) {
+        sprite.setPosition(x, y);
+    }
+
+    sf::Vector2f getPosition() const {
+        return sprite.getPosition();
+    }
+
+    sf::FloatRect getGlobalBounds() const {
+        return sprite.getGlobalBounds();
+    }
+
+     float getHealthPercentage() const {
+        return (maxHealth > 0) ? (currentHealth / maxHealth) : 0.0f;
+    }
+
+    // Recalculate ground level and boundaries on resize
+    void onResize(const sf::RenderWindow& window) {
+        if (animations.count(ActionState::IDLE) > 0) {
+            float charHeight = animations.at(ActionState::IDLE).frameHeight * scale;
+            // Ground Y depends on where the origin is set. If centered:
+             float originOffsetY = sprite.getOrigin().y * scale;
+            groundY = static_cast<float>(window.getSize().y) - (charHeight - originOffsetY) - 20.f;
+            // If origin is 0,0:
+            // groundY = static_cast<float>(window.getSize().y) - charHeight - 20.f;
+        } else {
+            groundY = static_cast<float>(window.getSize().y) - 100.f; // Fallback
+        }
+
+        // Ensure character stays on the (new) ground if not jumping
+        if (!isJumping && std::abs(sprite.getPosition().y - groundY) > 1.0f) { // Add tolerance
+            sprite.setPosition(sprite.getPosition().x, groundY);
+        }
+
+        keepInBounds(window); // Adjust position if resize pushed character out
+    }
+
+private:
+    sf::Sprite sprite;
+    std::map<ActionState, AnimationData> animations;
+
+    // Textures
+    sf::Texture idleTexture, runTexture, jumpTexture;
+    sf::Texture attack1Texture, attack2Texture, attack3Texture, shieldTexture;
+
+    // State & Physics
+    ActionState currentAction;
+    float scale;
+    float baseSpeed;
+    float jumpSpeed;
+    float gravity;
+    float verticalVelocity;
+    float groundY;
+    bool facingRight;
+    bool isJumping;
+    bool isAttacking;
+    bool isShielding;
+    bool canAttack;
+     float maxHealth;
+    float currentHealth;
+
+    // Animation Control
+    int currentFrame;
+    sf::Time animationTimer;
+    sf::Clock attackCooldownClock;
+    const sf::Time attackCooldown = sf::seconds(0.5f);
+};
+
+// --- AnimatedBackground ---
+class AnimatedBackground {
+public:
+    AnimatedBackground() :
+        currentFrame(0),
+        frameDuration(sf::seconds(BG_FRAME_DELAY)),
+        elapsedTime(sf::Time::Zero),
+        loaded(false)
+    {}
+
+    bool loadFrames(int mapChoice) {
+        frames.clear();
+        loaded = false;
+        int frameCount = 0;
+        std::string baseFilename;
+        std::string extension;
+        int startIdx = 0;
+
+        if (mapChoice == 1) {
+            frameCount = MAP1_FRAME_COUNT;
+            baseFilename = "frame_";
+            extension = "_delay-0.11s.png";
+            startIdx = 0;
+        } else if (mapChoice == 2) {
+            frameCount = MAP2_FRAME_COUNT;
+            baseFilename = "bg1.";
+            extension = ".png";
+            startIdx = 1;
+        } else {
+            std::cerr << "Error: Invalid map choice for background: " << mapChoice << std::endl;
+            return false;
+        }
+
+        try {
+            frames.resize(frameCount);
+            for (int i = 0; i < frameCount; ++i) {
+                std::string filename = baseFilename + std::to_string(i + startIdx) + extension;
+                if (!frames[i].loadFromFile(filename)) {
+                    // Construct error message before throwing
+                    std::string errorMsg = "Failed to load background frame: " + filename;
+                    throw std::runtime_error(errorMsg);
+                }
+            }
+        } catch (const std::runtime_error& e) {
+             std::cerr << "Background Loading Error: " << e.what() << std::endl;
+             frames.clear(); // Ensure frames is empty on failure
+             return false; // Indicate failure
+        }
+
+
+        if (!frames.empty()) {
+            sprite.setTexture(frames[0]);
+            loaded = true;
+            std::cout << "Background frames for map " << mapChoice << " loaded." << std::endl;
+            reset();
+            return true;
+        }
+        return false;
+    }
+
+    void update(sf::Time dt) {
+        if (!loaded || frames.empty() || frameDuration <= sf::Time::Zero) return;
+
+        elapsedTime += dt;
+        if (elapsedTime >= frameDuration) {
+            // Use modulo on time for potentially smoother animation with variable dt
+            elapsedTime = sf::microseconds(elapsedTime.asMicroseconds() % frameDuration.asMicroseconds());
+            currentFrame = (currentFrame + 1) % frames.size();
+            sprite.setTexture(frames[currentFrame]); // Update texture only when frame changes
+        }
+    }
+
+    void render(sf::RenderTarget& target) {
+        if (!loaded) return;
+        target.draw(sprite);
+    }
+
+    void resize(sf::Vector2u windowSize) {
+        if (!loaded || frames.empty() || sprite.getTexture() == nullptr) return;
+
+        // Recalculate scale to fit the new window size
+        const sf::Texture* tex = sprite.getTexture();
+        if (tex) {
+            float texWidth = static_cast<float>(tex->getSize().x);
+            float texHeight = static_cast<float>(tex->getSize().y);
+             if (texWidth > 0 && texHeight > 0) { // Avoid division by zero
+                float scaleX = static_cast<float>(windowSize.x) / texWidth;
+                float scaleY = static_cast<float>(windowSize.y) / texHeight;
+                sprite.setScale(scaleX, scaleY);
+            }
+        }
+    }
+
+    void reset() {
+        currentFrame = 0;
+        elapsedTime = sf::Time::Zero;
+        if (!frames.empty()) {
+            sprite.setTexture(frames[0]);
+        }
+    }
+
+private:
+    sf::Sprite sprite;
+    std::vector<sf::Texture> frames;
+    int currentFrame;
+    sf::Time frameDuration;
+    sf::Time elapsedTime;
+    bool loaded;
+};
+
+
+// --- GameState (Abstract Base Class) ---
+class GameState {
+public:
+    virtual ~GameState() = default;
+    virtual void handleInput(sf::Event& event) = 0;
+    virtual void update(sf::Time dt) = 0;
+    virtual void render(sf::RenderTarget& target) = 0;
+    virtual void onResize(sf::Vector2u newSize) = 0; // Called when window resizes
+
+protected:
+    Game& game; // Reference to access Game resources and methods
+    GameState(Game& gameRef) : game(gameRef) {}
+};
+
+
+// --- Game Class ---
+class Game {
+public:
+    Game() :
+        window(sf::VideoMode(WINDOW_WIDTH, WINDOW_HEIGHT), "HellFire-Clash", sf::Style::Default),
+        currentState(nullptr) // Initialize to nullptr
+    {
+        window.setFramerateLimit(FRAME_RATE_LIMIT);
+        try {
+            resources.loadResources(); // Load shared resources
+            // Start with the Main Menu state
+             changeState(std::make_unique<MainMenuState>(*this)); // Use 'this' after full construction
+        } catch (const std::runtime_error& e) {
+            std::cerr << "Initialization Error: " << e.what() << std::endl;
+            // Mark game as invalid or close window?
+             window.close(); // Close if essential resources failed
+        }
+    }
+
+    void run() {
+        while (window.isOpen()) {
+            sf::Time dt = deltaClock.restart();
+            handleEvents();
+            update(dt);
+            render();
+        }
+    }
+
+    // Function to change the current game state
+    void changeState(std::unique_ptr<GameState> newState) {
+        if (newState) {
+            currentState = std::move(newState);
+             // Call resize on the new state immediately in case window was resized before state change
+            currentState->onResize(window.getSize());
+        } else {
+             std::cerr << "Warning: Attempted to change to a null state!" << std::endl;
+        }
+    }
+
+    // Accessors for states
+    sf::RenderWindow& getWindow() { return window; }
+    ResourceManager& getResources() { return resources; }
+    std::string& getPlayerNameRef() { return playerName; } // Get reference
+    void setPlayerName(const std::string& name) { playerName = name; }
+    const std::string& getPlayerName() const { return playerName; } // Get const reference
+
+private:
+    void handleEvents() {
+        sf::Event event;
+        while (window.pollEvent(event)) {
+            if (event.type == sf::Event::Closed) {
+                window.close();
+            }
+            // Handle resize event globally
+            else if (event.type == sf::Event::Resized) {
+                handleResize(event.size.width, event.size.height);
+            }
+            // Delegate other events to the current state
+            else if (currentState) {
+                currentState->handleInput(event);
+            }
+        }
+    }
+
+    void update(sf::Time dt) {
+        if (currentState) {
+            currentState->update(dt);
+        }
+    }
+
+    void render() {
+        window.clear(sf::Color::Black); // Default clear color
+        if (currentState) {
+            currentState->render(window);
+        }
+        window.display();
+    }
+
+    // Handles window resizing
+    void handleResize(unsigned int width, unsigned int height) {
+         if (width == 0 || height == 0) return; // Avoid invalid view/size
+
+        // Update the view to match the new window size
+        sf::FloatRect visibleArea(0.f, 0.f, static_cast<float>(width), static_cast<float>(height));
+        window.setView(sf::View(visibleArea));
+
+        // Notify the current state about the resize
+        if (currentState) {
+            currentState->onResize(sf::Vector2u(width, height));
+        }
+         std::cout << "Window resized to: " << width << "x" << height << std::endl;
+    }
+
+
+    sf::RenderWindow window;
+    ResourceManager resources;
+    std::unique_ptr<GameState> currentState;
+    sf::Clock deltaClock;
+    std::string playerName = "Player"; // Default player name
+};
+
+
+// --- MainMenuState ---
+class MainMenuState : public GameState {
+public:
+    MainMenuState(Game& gameRef) : GameState(gameRef) {
+        std::cout << "Entering MainMenuState" << std::endl;
+        backgroundSprite.setTexture(game.getResources().menuBackgroundTexture);
+        setupUI();
+        // Initial positioning handled by onResize
+    }
+
+    void setupUI() {
+        titleText.setFont(game.getResources().font);
+        titleText.setString("HELLFIRE-CLASH");
+        titleText.setCharacterSize(100);
+        titleText.setFillColor(sf::Color(255, 69, 0));
+        titleText.setOutlineColor(sf::Color::Black);
+        titleText.setOutlineThickness(5);
+        titleText.setStyle(sf::Text::Bold);
+
+        promptText.setFont(game.getResources().font);
+        promptText.setString("PRESS ENTER");
+        promptText.setCharacterSize(50);
+        promptText.setFillColor(sf::Color::White);
+        promptText.setOutlineColor(sf::Color(255, 69, 0));
+        promptText.setOutlineThickness(3);
+    }
+
+    void handleInput(sf::Event& event) override {
+        if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Enter) {
+            game.changeState(std::make_unique<NameInputState>(game));
+        }
+    }
+
+    void update(sf::Time dt) override {
+        // Animate title and prompt based on time
+        float time = animationClock.getElapsedTime().asSeconds();
+        float windowWidth = static_cast<float>(game.getWindow().getSize().x);
+        float windowHeight = static_cast<float>(game.getWindow().getSize().y); // Use window height for vertical positioning
+
+        // Center Title (animated vertically)
+        sf::FloatRect titleBounds = titleText.getLocalBounds();
+        titleText.setOrigin(titleBounds.left + titleBounds.width / 2.f, titleBounds.top + titleBounds.height / 2.f);
+        titleText.setPosition(windowWidth / 2.f, windowHeight * 0.25f + 10.f * std::sin(time * 2.f)); // Use relative positioning
+
+
+        // Center and Pulsate Prompt
+        float pulse = 0.9f + 0.1f * std::sin(time * 3.f); // More subtle pulse
+        sf::FloatRect promptBounds = promptText.getLocalBounds();
+        promptText.setOrigin(promptBounds.left + promptBounds.width / 2.f, promptBounds.top + promptBounds.height / 2.f);
+        promptText.setPosition(windowWidth / 2.f, windowHeight * 0.6f);
+        promptText.setScale(pulse, pulse);
+    }
+
+    void render(sf::RenderTarget& target) override {
+        target.draw(backgroundSprite);
+        target.draw(titleText);
+        target.draw(promptText);
+    }
+
+    void onResize(sf::Vector2u newSize) override {
+         // Rescale background
+        float scaleX = static_cast<float>(newSize.x) / backgroundSprite.getLocalBounds().width;
+        float scaleY = static_cast<float>(newSize.y) / backgroundSprite.getLocalBounds().height;
+        backgroundSprite.setScale(scaleX, scaleY);
+
+        // Reposition UI (update handles centering dynamically)
+        update(sf::Time::Zero); // Call update to reposition based on new size immediately
+    }
+
+private:
+    sf::Sprite backgroundSprite;
+    sf::Text titleText;
+    sf::Text promptText;
+    sf::Clock animationClock;
+};
+
+// --- NameInputState ---
+class NameInputState : public GameState {
+public:
+    NameInputState(Game& gameRef) :
+        GameState(gameRef),
+        nameInputActive(true), // Start active
+        showCursor(true)
+    {
+        std::cout << "Entering NameInputState" << std::endl;
+        backgroundSprite.setTexture(game.getResources().menuBackgroundTexture);
+        playerInput = game.getPlayerNameRef(); // Get reference to game's player name
+        setupUI();
+        cursorBlinkClock.restart();
+        // Initial positioning handled by onResize
+    }
+
+     void setupUI() {
+        promptText.setFont(game.getResources().font);
+        promptText.setString("ENTER YOUR NAME:");
+        promptText.setCharacterSize(50);
+        promptText.setFillColor(sf::Color::White);
+
+        nameBox.setSize(sf::Vector2f(500, 70)); // Slightly larger box
+        nameBox.setOutlineThickness(3);
+        nameBox.setOutlineColor(sf::Color::White);
+        nameBox.setFillColor(sf::Color(0, 0, 0, 100)); // Semi-transparent black box
+
+        nameDisplayText.setFont(game.getResources().font);
+        nameDisplayText.setCharacterSize(40);
+        nameDisplayText.setFillColor(sf::Color::White); // White text
+
+        continueText.setFont(game.getResources().font);
+        continueText.setString("PRESS ENTER TO CONTINUE");
+        continueText.setCharacterSize(30);
+        continueText.setFillColor(sf::Color::Green);
+    }
+
+    void handleInput(sf::Event& event) override {
+        if (event.type == sf::Event::MouseButtonPressed) {
+            sf::Vector2f mousePos = game.getWindow().mapPixelToCoords(sf::Mouse::getPosition(game.getWindow()));
+            nameInputActive = nameBox.getGlobalBounds().contains(mousePos);
+            if (nameInputActive) {
+                 cursorBlinkClock.restart();
+                 showCursor = true; // Show cursor immediately on click
+            }
+        }
+
+        if (event.type == sf::Event::KeyPressed) {
+            if (event.key.code == sf::Keyboard::Enter) {
+                if (!playerInput.empty()) {
+                    game.setPlayerName(playerInput); // Update game's player name
+                    game.changeState(std::make_unique<MapSelectionState>(game));
+                }
+            } else if (event.key.code == sf::Keyboard::Escape) {
+                 // Optionally clear name on Escape or just go back
+                // playerInput.clear();
+                game.changeState(std::make_unique<MainMenuState>(game)); // Go back to main menu
+            }
+        }
+
+        if (nameInputActive && event.type == sf::Event::TextEntered) {
+            // Handle backspace
+            if (event.text.unicode == '\b') { // Backspace
+                if (!playerInput.empty()) {
+                    playerInput.pop_back();
+                }
+            }
+            // Handle printable characters (basic ASCII range, ignore control chars)
+            else if (event.text.unicode >= 32 && event.text.unicode < 127) {
+                if (playerInput.size() < 20) { // Limit name length
+                    playerInput += static_cast<char>(event.text.unicode);
+                }
+            }
+            // Reset cursor blink on text input
+            cursorBlinkClock.restart();
+            showCursor = true;
+        }
+    }
+
+    void update(sf::Time dt) override {
+        // Update cursor blink state
+        if (cursorBlinkClock.getElapsedTime().asSeconds() > 0.5f) {
+            showCursor = !showCursor;
+            cursorBlinkClock.restart();
+        }
+
+        // Update display text including cursor
+        std::string displayString = playerInput;
+        if (nameInputActive && showCursor) {
+            displayString += "_"; // Use underscore as cursor
+        }
+        nameDisplayText.setString(displayString);
+
+        // Recenter UI elements (important after resize or text changes)
+        centerUI();
+    }
+
+     void centerUI() {
+         float windowWidth = static_cast<float>(game.getWindow().getSize().x);
+         float windowHeight = static_cast<float>(game.getWindow().getSize().y);
+
+         // Center Prompt
+         sf::FloatRect promptBounds = promptText.getLocalBounds();
+         promptText.setOrigin(promptBounds.left + promptBounds.width / 2.f, promptBounds.top + promptBounds.height / 2.f);
+         promptText.setPosition(windowWidth / 2.f, windowHeight * 0.3f);
+
+         // Center Box
+         nameBox.setOrigin(nameBox.getSize().x / 2.f, nameBox.getSize().y / 2.f);
+         nameBox.setPosition(windowWidth / 2.f, windowHeight * 0.45f);
+
+         // Position Text inside Box (left-aligned with padding)
+         sf::FloatRect boxBounds = nameBox.getGlobalBounds();
+         nameDisplayText.setPosition(boxBounds.left + 15.f, boxBounds.top + (boxBounds.height / 2.f) - (nameDisplayText.getLocalBounds().height / 1.5f) ); // Adjust vertical alignment
+
+         // Center Continue Text
+         if (!playerInput.empty()) {
+             sf::FloatRect continueBounds = continueText.getLocalBounds();
+             continueText.setOrigin(continueBounds.left + continueBounds.width / 2.f, continueBounds.top + continueBounds.height / 2.f);
+             continueText.setPosition(windowWidth / 2.f, windowHeight * 0.6f);
+         }
+     }
+
+
+    void render(sf::RenderTarget& target) override {
+        target.draw(backgroundSprite);
+        target.draw(promptText);
+        target.draw(nameBox);
+        target.draw(nameDisplayText);
+
+        if (!playerInput.empty()) {
+            target.draw(continueText);
+        }
+    }
+
+     void onResize(sf::Vector2u newSize) override {
+         // Rescale background
+        float scaleX = static_cast<float>(newSize.x) / backgroundSprite.getLocalBounds().width;
+        float scaleY = static_cast<float>(newSize.y) / backgroundSprite.getLocalBounds().height;
+        backgroundSprite.setScale(scaleX, scaleY);
+
+        // Recenter UI
+        centerUI();
+    }
+
+
+private:
+    sf::Sprite backgroundSprite;
+    sf::Text promptText;
+    sf::RectangleShape nameBox;
+    sf::Text nameDisplayText; // Shows the name being typed + cursor
+    sf::Text continueText;
+    sf::Clock cursorBlinkClock;
+
+    std::string& playerInput; // Reference to the actual player name string in Game
+    bool nameInputActive;
+    bool showCursor;
+};
+
+
+// --- MapSelectionState ---
+class MapSelectionState : public GameState {
+public:
+     MapSelectionState(Game& gameRef) : GameState(gameRef), selectedMap(0) {
+        std::cout << "Entering MapSelectionState" << std::endl;
+        backgroundSprite.setTexture(game.getResources().menuBackgroundTexture);
+        setupUI();
+         // Initial positioning handled by onResize
+    }
+
+     void setupUI() {
+        promptText.setFont(game.getResources().font);
+        promptText.setString("SELECT MAP:");
+        promptText.setCharacterSize(50);
+        promptText.setFillColor(sf::Color::White);
+
+        // Button 1
+        map1Button.setSize(sf::Vector2f(300, 100));
+        map1Button.setFillColor(sf::Color(100, 100, 255, 200)); // Add alpha
+        map1Button.setOutlineColor(sf::Color::White);
+        map1Button.setOutlineThickness(2);
+        map1Text.setFont(game.getResources().font);
+        map1Text.setString("LAVA FLOW"); // Descriptive name
+        map1Text.setCharacterSize(40);
+        map1Text.setFillColor(sf::Color::White);
+
+        // Button 2
+        map2Button.setSize(sf::Vector2f(300, 100));
+        map2Button.setFillColor(sf::Color(255, 100, 100, 200)); // Add alpha
+        map2Button.setOutlineColor(sf::Color::White);
+        map2Button.setOutlineThickness(2);
+        map2Text.setFont(game.getResources().font);
+        map2Text.setString("FIRE PIT"); // Descriptive name
+        map2Text.setCharacterSize(40);
+        map2Text.setFillColor(sf::Color::White);
+    }
+
+     void handleInput(sf::Event& event) override {
+         if (event.type == sf::Event::MouseButtonPressed) {
+             if (event.mouseButton.button == sf::Mouse::Left) {
+                 sf::Vector2f mousePos = game.getWindow().mapPixelToCoords(sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
+
+                 if (map1Button.getGlobalBounds().contains(mousePos)) {
+                     selectedMap = 1;
+                 } else if (map2Button.getGlobalBounds().contains(mousePos)) {
+                     selectedMap = 2;
+                 }
+
+                 if (selectedMap > 0) {
+                     // Transition to GamePlay state, passing the selected map
+                    try {
+                        game.changeState(std::make_unique<GamePlayState>(game, selectedMap));
+                    } catch (const std::runtime_error& e) {
+                         std::cerr << "Error transitioning to GamePlayState: " << e.what() << std::endl;
+                         // Optionally return to menu or show an error message state
+                         game.changeState(std::make_unique<MainMenuState>(game));
+                    }
+                 }
+             }
+         } else if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Escape) {
+              game.changeState(std::make_unique<NameInputState>(game)); // Go back to name input
+         }
+     }
+
+     void update(sf::Time dt) override {
+         // Optional: Add hover effects for buttons
+         sf::Vector2f mousePos = game.getWindow().mapPixelToCoords(sf::Mouse::getPosition(game.getWindow()));
+
+         // Reset outline first
+         map1Button.setOutlineThickness(2);
+         map2Button.setOutlineThickness(2);
+
+         if (map1Button.getGlobalBounds().contains(mousePos)) {
+             map1Button.setOutlineThickness(4); // Highlight on hover
+         } else if (map2Button.getGlobalBounds().contains(mousePos)) {
+             map2Button.setOutlineThickness(4); // Highlight on hover
+         }
+     }
+
+    void centerAndPositionUI() {
+        float windowWidth = static_cast<float>(game.getWindow().getSize().x);
+        float windowHeight = static_cast<float>(game.getWindow().getSize().y);
+        float buttonSpacing = 50.f; // Space between buttons
+        float totalButtonWidth = map1Button.getSize().x + map2Button.getSize().x + buttonSpacing;
+
+        // Center Prompt
+        sf::FloatRect promptBounds = promptText.getLocalBounds();
+        promptText.setOrigin(promptBounds.left + promptBounds.width / 2.f, promptBounds.top + promptBounds.height / 2.f);
+        promptText.setPosition(windowWidth / 2.f, windowHeight * 0.25f);
+
+        // Position Buttons side-by-side, centered horizontally
+        float startX = (windowWidth - totalButtonWidth) / 2.f;
+        float buttonY = windowHeight * 0.5f;
+
+        map1Button.setPosition(startX, buttonY);
+        map2Button.setPosition(startX + map1Button.getSize().x + buttonSpacing, buttonY);
+
+        // Center Text within Buttons
+        sf::FloatRect bounds1 = map1Button.getGlobalBounds();
+        sf::FloatRect textBounds1 = map1Text.getLocalBounds();
+        map1Text.setOrigin(textBounds1.left + textBounds1.width / 2.f, textBounds1.top + textBounds1.height / 2.f);
+        map1Text.setPosition(bounds1.left + bounds1.width / 2.f, bounds1.top + bounds1.height / 2.f);
+
+        sf::FloatRect bounds2 = map2Button.getGlobalBounds();
+        sf::FloatRect textBounds2 = map2Text.getLocalBounds();
+        map2Text.setOrigin(textBounds2.left + textBounds2.width / 2.f, textBounds2.top + textBounds2.height / 2.f);
+        map2Text.setPosition(bounds2.left + bounds2.width / 2.f, bounds2.top + bounds2.height / 2.f);
+    }
+
+
+     void render(sf::RenderTarget& target) override {
+         target.draw(backgroundSprite);
+         target.draw(promptText);
+         target.draw(map1Button);
+         target.draw(map1Text);
+         target.draw(map2Button);
+         target.draw(map2Text);
+     }
+
+    void onResize(sf::Vector2u newSize) override {
+        // Rescale background
+        float scaleX = static_cast<float>(newSize.x) / backgroundSprite.getLocalBounds().width;
+        float scaleY = static_cast<float>(newSize.y) / backgroundSprite.getLocalBounds().height;
+        backgroundSprite.setScale(scaleX, scaleY);
+
+        // Recenter UI
+        centerAndPositionUI();
+    }
+
+private:
+    sf::Sprite backgroundSprite;
+    sf::Text promptText;
+    sf::RectangleShape map1Button;
+    sf::Text map1Text;
+    sf::RectangleShape map2Button;
+    sf::Text map2Text;
+    int selectedMap; // 1 or 2
+};
+
+// --- GamePlayState ---
+class GamePlayState : public GameState {
+public:
+     // Constructor now takes map choice
+    GamePlayState(Game& gameRef, int mapChoice) :
+        GameState(gameRef),
+        playerCharacter(), // Default construct character
+        background()      // Default construct background
+    {
+        std::cout << "Entering GamePlayState (Map: " << mapChoice << ")" << std::endl;
+
+        // Load background first, check for failure
+        if (!background.loadFrames(mapChoice)) {
+             // Throw an exception to indicate failure to load essential resources
+             throw std::runtime_error("Failed to load background frames for map " + std::to_string(mapChoice));
+        }
+
+        // Setup UI elements
+        setupGameUI();
+
+        // Reset player and background for the chosen map and window size
+        // playerCharacter.reset(game.getWindow()); // Reset also calls onResize
+        // background.reset();
+        // background.resize(game.getWindow().getSize()); // Ensure background is scaled initially
+
+        // Call onResize explicitly to set everything up correctly for the current window size
+        onResize(game.getWindow().getSize());
+         playerCharacter.reset(game.getWindow()); // Reset player state AFTER resize establishes groundY etc.
+    }
+
+    void setupGameUI() {
+        healthBarBackground.setSize(sf::Vector2f(300, 30));
+        healthBarBackground.setFillColor(sf::Color(50, 50, 50, 200)); // Dark grey, semi-transparent
+        healthBarBackground.setOutlineColor(sf::Color::Black);
+        healthBarBackground.setOutlineThickness(1);
+
+        healthBarForeground.setSize(sf::Vector2f(300, 30)); // Initial full size
+        healthBarForeground.setFillColor(sf::Color::Green);
+
+        playerNameText.setFont(game.getResources().font);
+        playerNameText.setCharacterSize(24);
+        playerNameText.setFillColor(sf::Color::White);
+        playerNameText.setString("Player: " + game.getPlayerName()); // Set name from Game object
+    }
+
+     void handleInput(sf::Event& event) override {
+         if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Escape) {
+             // Pass 'this' GamePlayState to the PauseState so it can draw it underneath
+             game.changeState(std::make_unique<PauseState>(game, this));
+         } else {
+            // Delegate other input to the player character
+            playerCharacter.handleInput(event, sf::seconds(1.f/FRAME_RATE_LIMIT)); // Pass approximate dt? Or get from update? Better from update.
+             // Input handling that directly affects character should ideally be polled in update(),
+             // but key presses/releases can be handled here.
+         }
+     }
+
+     void update(sf::Time dt) override {
+         // Handle continuous input polling for movement etc. inside character update
+         playerCharacter.update(dt, game.getWindow());
+         background.update(dt);
+
+         // Update UI elements like health bar
+        float healthPercent = playerCharacter.getHealthPercentage();
+        healthBarForeground.setSize(sf::Vector2f(healthBarBackground.getSize().x * healthPercent, healthBarBackground.getSize().y));
+        // Change health bar color based on health
+        if (healthPercent > 0.6f) healthBarForeground.setFillColor(sf::Color::Green);
+        else if (healthPercent > 0.3f) healthBarForeground.setFillColor(sf::Color::Yellow);
+        else healthBarForeground.setFillColor(sf::Color::Red);
+
+         // Update positions of UI elements (in case of resize or dynamic UI)
+         positionGameUI();
+     }
+
+      void positionGameUI() {
+        float padding = 20.f;
+        // Top-left corner
+        healthBarBackground.setPosition(padding, padding);
+        healthBarForeground.setPosition(padding, padding);
+        playerNameText.setPosition(padding, padding + healthBarBackground.getSize().y + 5.f);
+    }
+
+
+     void render(sf::RenderTarget& target) override {
+         background.render(target);
+         playerCharacter.render(target);
+
+         // Draw UI
+         target.draw(healthBarBackground);
+         target.draw(healthBarForeground);
+         target.draw(playerNameText);
+     }
+
+     // Public method for PauseState to render the game scene underneath
+    void renderForPause(sf::RenderTarget& target) {
+        background.render(target);
+        playerCharacter.render(target);
+        target.draw(healthBarBackground);
+        target.draw(healthBarForeground);
+        target.draw(playerNameText);
+    }
+
+    void resetGame() {
+         playerCharacter.reset(game.getWindow());
+         background.reset();
+         // Ensure UI is positioned correctly after reset
+         positionGameUI();
+    }
+
+
+     void onResize(sf::Vector2u newSize) override {
+         background.resize(newSize);
+         playerCharacter.onResize(game.getWindow()); // Let character recalculate ground etc.
+         positionGameUI(); // Reposition UI
+     }
+
+private:
+    Character playerCharacter;
+    AnimatedBackground background;
+
+    // Game UI Elements
+    sf::RectangleShape healthBarBackground;
+    sf::RectangleShape healthBarForeground;
+    sf::Text playerNameText;
+};
+
+// --- PauseState ---
+class PauseState : public GameState {
+public:
+    // Constructor takes the GamePlayState it's pausing
+    PauseState(Game& gameRef, GamePlayState* pausedStateRef) :
+        GameState(gameRef),
+        pausedState(pausedStateRef)
+    {
+        std::cout << "Entering PauseState" << std::endl;
+        if (!pausedState) {
+             std::cerr << "Error: PauseState created without a valid GamePlayState to pause!" << std::endl;
+             // Handle error - maybe transition back immediately?
+             game.changeState(std::make_unique<MainMenuState>(game)); // Go to menu as fallback
+             return;
+        }
+        setupUI();
+         // Initial positioning handled by onResize
+    }
+
+    void setupUI() {
+        // Overlay
+        overlay.setFillColor(sf::Color(0, 0, 0, 150)); // Semi-transparent black
+
+        // Pause Text
+        pauseText.setFont(game.getResources().font);
+        pauseText.setString("PAUSED");
+        pauseText.setCharacterSize(80);
+        pauseText.setFillColor(sf::Color::White);
+        pauseText.setStyle(sf::Text::Bold);
+
+        // Buttons (using Text for simplicity, could be RectangleShape + Text)
+        resumeText.setFont(game.getResources().font);
+        resumeText.setString("RESUME");
+        resumeText.setCharacterSize(50);
+        resumeText.setFillColor(sf::Color::White);
+
+        restartText.setFont(game.getResources().font);
+        restartText.setString("RESTART");
+        restartText.setCharacterSize(50);
+        restartText.setFillColor(sf::Color::White);
+
+        menuText.setFont(game.getResources().font);
+        menuText.setString("MAIN MENU");
+        menuText.setCharacterSize(50);
+        menuText.setFillColor(sf::Color::White);
+
+        // Store original button colors
+        buttonColors[resumeText.getString().toAnsiString()] = sf::Color::White;
+        buttonColors[restartText.getString().toAnsiString()] = sf::Color::White;
+        buttonColors[menuText.getString().toAnsiString()] = sf::Color::White;
+    }
+
+    void handleInput(sf::Event& event) override {
+        if (event.type == sf::Event::KeyPressed) {
+            if (event.key.code == sf::Keyboard::Escape) {
+                // Resume game - need to change state back correctly
+                // We don't own pausedState, so Game should transition back
+                // How to signal this? For now, assume Game handles the Esc press itself
+                // Or, let Game handle Esc to resume? Simpler.
+                // *** Correction: The Game loop delegates Esc to the state. So PauseState *must* handle it. ***
+                game.changeState(std::unique_ptr<GameState>(pausedState)); // Transfer ownership back
+                // IMPORTANT: We MUST detach pausedState from this unique_ptr first, or give ownership back carefully.
+                // Let's NOT use unique_ptr for the pausedState reference. Game owns the states.
+                // We need a mechanism for PauseState to tell Game to resume.
+                // For simplicity now: just change state back to the *pointer* we have.
+                // This assumes the Game class doesn't delete the GamePlayState when PauseState starts.
+                // A better approach involves Game managing the state stack.
+                // --- Revised approach: PauseState tells Game to resume ---
+                // game.resumePreviousState(); // Needs implementation in Game class
+                // --- Simplest approach for now (might leak if Game deletes states): ---
+                 // Game's changeState should handle deleting the current (Pause) state.
+                 // It needs to know what state to return to.
+                 // Let's pass the pausedState back to game.changeState to handle.
+                 // game.changeState(std::unique_ptr<GameState>(pausedState)); // This transfers ownership, risky.
+
+                 // --- Safer: Store paused state pointer in Game ---
+                 // game.resumeGame(); // Game class method would switch back
+                 // --- Direct but slightly hacky: ---
+                 // Assume GamePlayState pointer is valid and Game will handle deletion correctly.
+                 // This requires careful management in the Game class.
+                 // game.changeState(std::make_unique<GamePlayState>(*pausedState)); // Create new? No.
+
+                  // Let's assume Game's changeState replaces the current unique_ptr, deleting the old one (PauseState).
+                  // We need to give the GamePlayState back. Since Game manages the unique_ptr,
+                  // this PauseState shouldn't hold a unique_ptr to it. Let's hold a raw pointer.
+                  // The Game class needs modification to support pausing/resuming properly.
+
+                  // --- Workaround for current structure: ---
+                  // Since Game only holds one currentState unique_ptr, we can't easily "go back".
+                  // Let's recreate the GamePlayState when resuming (losing its exact state).
+                  // This is NOT ideal but fits the simple state machine.
+                  // TODO: Implement a proper state stack in Game for pausing.
+                   std::cout << "Resume pressed (recreating state - limitation)" << std::endl;
+                  try {
+                       // Need map choice to recreate - how to get it? Store in Game? Pass via PauseState?
+                       // Let's assume we need to store lastMapChoice in Game or pass it.
+                       // For now, hardcode map 1 for resume (BAD)
+                       int mapToResume = 1; // PROBLEM: Need the actual map!
+                       // game.changeState(std::make_unique<GamePlayState>(game, mapToResume));
+                        std::cerr << "Resume functionality limited. Returning to menu instead." << std::endl;
+                       game.changeState(std::make_unique<MainMenuState>(game));
+
+
+                  } catch (const std::runtime_error& e) {
+                        std::cerr << "Error resuming game: " << e.what() << std::endl;
+                        game.changeState(std::make_unique<MainMenuState>(game));
+                  }
+
+            }
+        } else if (event.type == sf::Event::MouseButtonPressed) {
+            if (event.mouseButton.button == sf::Mouse::Left) {
+                sf::Vector2f mousePos = game.getWindow().mapPixelToCoords(sf::Vector2i(event.mouseButton.x, event.mouseButton.y));
+
+                if (resumeText.getGlobalBounds().contains(mousePos)) {
+                    // Resume game (Same problem as Esc key - see above)
+                     std::cerr << "Resume functionality limited. Returning to menu instead." << std::endl;
+                    game.changeState(std::make_unique<MainMenuState>(game));
+
+                } else if (restartText.getGlobalBounds().contains(mousePos)) {
+                    // Tell the paused state to reset itself, then resume
+                     if (pausedState) {
+                        pausedState->resetGame();
+                        // Then resume (same problem again)
+                         std::cerr << "Restart functionality limited. Returning to menu instead." << std::endl;
+                         game.changeState(std::make_unique<MainMenuState>(game));
+
+                     }
+                } else if (menuText.getGlobalBounds().contains(mousePos)) {
+                    // Go back to the main menu
+                    game.changeState(std::make_unique<MainMenuState>(game));
+                }
+            }
+        }
+    }
+
+    void update(sf::Time dt) override {
+         // Update hover effect
+         sf::Vector2f mousePos = game.getWindow().mapPixelToCoords(sf::Mouse::getPosition(game.getWindow()));
+
+         // Reset colors
+         resumeText.setFillColor(buttonColors[resumeText.getString().toAnsiString()]);
+         restartText.setFillColor(buttonColors[restartText.getString().toAnsiString()]);
+         menuText.setFillColor(buttonColors[menuText.getString().toAnsiString()]);
+         resumeText.setStyle(sf::Text::Regular);
+         restartText.setStyle(sf::Text::Regular);
+         menuText.setStyle(sf::Text::Regular);
+
+
+         // Apply hover color
+         if (resumeText.getGlobalBounds().contains(mousePos)) {
+             resumeText.setFillColor(sf::Color::Green);
+              resumeText.setStyle(sf::Text::Bold);
+         } else if (restartText.getGlobalBounds().contains(mousePos)) {
+             restartText.setFillColor(sf::Color::Yellow);
+             restartText.setStyle(sf::Text::Bold);
+         } else if (menuText.getGlobalBounds().contains(mousePos)) {
+             menuText.setFillColor(sf::Color::Red);
+             menuText.setStyle(sf::Text::Bold);
+         }
+         // No game logic updates while paused
+    }
+
+    void positionUI() {
+        float windowWidth = static_cast<float>(game.getWindow().getSize().x);
+        float windowHeight = static_cast<float>(game.getWindow().getSize().y);
+
+        // Overlay covers the whole screen
+        overlay.setSize(sf::Vector2f(windowWidth, windowHeight));
+        overlay.setPosition(0, 0);
+
+        // Center Pause Text
+        sf::FloatRect pauseBounds = pauseText.getLocalBounds();
+        pauseText.setOrigin(pauseBounds.left + pauseBounds.width / 2.f, pauseBounds.top + pauseBounds.height / 2.f);
+        pauseText.setPosition(windowWidth / 2.f, windowHeight * 0.25f);
+
+        // Stack buttons vertically, centered horizontally
+        float buttonYStart = windowHeight * 0.45f;
+        float buttonSpacing = 80.f;
+
+        sf::FloatRect resumeBounds = resumeText.getLocalBounds();
+        resumeText.setOrigin(resumeBounds.left + resumeBounds.width / 2.f, resumeBounds.top + resumeBounds.height / 2.f);
+        resumeText.setPosition(windowWidth / 2.f, buttonYStart);
+
+        sf::FloatRect restartBounds = restartText.getLocalBounds();
+        restartText.setOrigin(restartBounds.left + restartBounds.width / 2.f, restartBounds.top + restartBounds.height / 2.f);
+        restartText.setPosition(windowWidth / 2.f, buttonYStart + buttonSpacing);
+
+        sf::FloatRect menuBounds = menuText.getLocalBounds();
+        menuText.setOrigin(menuBounds.left + menuBounds.width / 2.f, menuBounds.top + menuBounds.height / 2.f);
+        menuText.setPosition(windowWidth / 2.f, buttonYStart + 2 * buttonSpacing);
+    }
+
+
+    void render(sf::RenderTarget& target) override {
+        // Draw the paused game state underneath first
+        if (pausedState) {
+            pausedState->renderForPause(target);
+        }
+
+        // Then draw the pause overlay and menu UI
+        target.draw(overlay);
+        target.draw(pauseText);
+        target.draw(resumeText);
+        target.draw(restartText);
+        target.draw(menuText);
+    }
+
+     void onResize(sf::Vector2u newSize) override {
+         // Resize overlay
+        overlay.setSize(sf::Vector2f(static_cast<float>(newSize.x), static_cast<float>(newSize.y)));
+        // Reposition UI elements
+        positionUI();
+        // We might also need to inform the pausedState about the resize if it hasn't been updated
+        // but typically the main game loop's resize handles that.
+         if (pausedState) {
+            // pausedState->onResize(newSize); // Potentially needed if pause state lasts long
+         }
+    }
+
+
+private:
+    GamePlayState* pausedState; // Raw pointer to the state being paused (Game owns the unique_ptr)
+    sf::RectangleShape overlay;
+    sf::Text pauseText;
+    sf::Text resumeText;
+    sf::Text restartText;
+    sf::Text menuText;
+    std::map<std::string, sf::Color> buttonColors; // Store default colors
+};
+
+
+// --- Main Function ---
+int main() {
+    try {
+        Game game;
+        game.run();
+    } catch (const std::runtime_error& e) {
+        std::cerr << "Unhandled Runtime Error: " << e.what() << std::endl;
+        // Display error in a simple OS messagebox if possible/desired
+        // Or just wait for user input before closing console
+        std::cerr << "Press Enter to exit..." << std::endl;
+        std::cin.get();
+        return EXIT_FAILURE;
+    } catch (...) {
+         std::cerr << "An unknown error occurred." << std::endl;
+         std::cerr << "Press Enter to exit..." << std::endl;
+        std::cin.get();
+         return EXIT_FAILURE;
+    }
+
+    return EXIT_SUCCESS;
+}
