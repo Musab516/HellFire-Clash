@@ -1,0 +1,560 @@
+#include <SFML/Graphics.hpp>
+#include <iostream>
+#include <vector>
+#include <string>
+#include <cmath>
+
+int main() {
+    // Create window
+    sf::RenderWindow window(sf::VideoMode(1280, 720), "HellFire-Clash", sf::Style::Default);
+    window.setFramerateLimit(60);
+
+    // Game states
+    enum GameState { MENU, NAME_INPUT, MAP_SELECTION, GAME };
+    GameState currentState = MENU;
+
+    std::string playerName;
+    bool nameInputActive = false;
+    sf::Clock menuClock;
+    sf::Clock cursorBlinkClock;
+    bool showCursor = true;
+
+    // Menu resources
+    sf::Font font;
+    if (!font.loadFromFile("ariblk.ttf")) {
+        std::cerr << "Failed to load font!" << std::endl;
+        return -1;
+    }
+
+    sf::Texture menuBgTex;
+    if (!menuBgTex.loadFromFile("hellfire.png")) {
+        std::cerr << "Failed to load menu background!" << std::endl;
+        return -1;
+    }
+    sf::Sprite menuBg(menuBgTex);
+    menuBg.setScale(
+        window.getSize().x / menuBg.getLocalBounds().width,
+        window.getSize().y / menuBg.getLocalBounds().height
+    );
+
+    // Animated title
+    sf::Text title("HELLFIRE-CLASH", font, 100);
+    title.setPosition(640 - title.getLocalBounds().width/2, 150);
+    title.setFillColor(sf::Color(255, 69, 0));
+    title.setOutlineColor(sf::Color::Black);
+    title.setOutlineThickness(5);
+    title.setStyle(sf::Text::Bold);
+
+    // Pulsating start prompt
+    sf::Text pressStart("PRESS ENTER TO START", font, 50);
+    pressStart.setPosition(640 - pressStart.getLocalBounds().width/2, 400);
+    pressStart.setFillColor(sf::Color::White);
+    pressStart.setOutlineColor(sf::Color(255, 69, 0));
+    pressStart.setOutlineThickness(3);
+
+    // Name input elements
+    sf::Text namePrompt("ENTER YOUR NAME:", font, 50);
+    namePrompt.setPosition(640 - namePrompt.getLocalBounds().width/2, 250);
+    namePrompt.setFillColor(sf::Color::White);
+
+    sf::RectangleShape nameBox(sf::Vector2f(500, 60));
+    nameBox.setPosition(640 - 250, 350);
+    nameBox.setOutlineThickness(3);
+    nameBox.setOutlineColor(sf::Color::White);
+    nameBox.setFillColor(sf::Color::Transparent);
+
+    sf::Text nameText("", font, 40);
+    nameText.setPosition(650 - 240, 360);
+    nameText.setFillColor(sf::Color::Yellow);
+
+    // Continue prompt
+    sf::Text continueText("PRESS ENTER TO CONTINUE", font, 30);
+    continueText.setPosition(640 - continueText.getLocalBounds().width/2, 450);
+    continueText.setFillColor(sf::Color::Green);
+
+    // Map selection elements
+    sf::Text mapPrompt("SELECT YOUR MAP:", font, 50);
+    mapPrompt.setFillColor(sf::Color::White);
+
+    sf::RectangleShape map1Button(sf::Vector2f(300, 100));
+    map1Button.setFillColor(sf::Color(100, 100, 255));
+    sf::Text map1Text("MAP 1", font, 40);
+    map1Text.setFillColor(sf::Color::White);
+
+    sf::RectangleShape map2Button(sf::Vector2f(300, 100));
+    map2Button.setFillColor(sf::Color(255, 100, 100));
+    sf::Text map2Text("MAP 2", font, 40);
+    map2Text.setFillColor(sf::Color::White);
+
+    // Background systems
+    const int MAP1_FRAME_COUNT = 8;
+    const int MAP2_FRAME_COUNT = 7;
+    const float FRAME_DELAY = 0.11f;
+    
+    std::vector<sf::Texture> map1Frames;
+    std::vector<sf::Texture> map2Frames;
+    
+    sf::Sprite background;
+    std::vector<sf::Texture>* currentBackgroundFrames = nullptr;
+    int bgFrame = 0;
+    float bgTimer = 0;
+    int currentMap = 1; // 1 or 2
+
+    // Character setup
+    sf::Texture idleTexture, runTexture, jumpTexture;
+    sf::Texture attack1Texture, attack2Texture, attack3Texture, shieldTexture;
+
+    if (!idleTexture.loadFromFile("Idle.png") ||
+        !runTexture.loadFromFile("Run.png") ||
+        !jumpTexture.loadFromFile("Jump.png") ||
+        !attack1Texture.loadFromFile("Attack_1.png") ||
+        !attack2Texture.loadFromFile("Attack_2.png") ||
+        !attack3Texture.loadFromFile("Attack_3.png") ||
+        !shieldTexture.loadFromFile("Shield.png")) {
+        std::cerr << "Error loading character textures!" << std::endl;
+        return -1;
+    }
+
+    // Animation constants
+    const int IDLE_FRAMES = 6, RUN_FRAMES = 8, JUMP_FRAMES = 10;
+    const int ATTACK1_FRAMES = 4, ATTACK2_FRAMES = 3, ATTACK3_FRAMES = 4, SHIELD_FRAMES = 2;
+    const float IDLE_SPEED = 0.15f, RUN_SPEED = 0.08f, JUMP_SPEED = 0.1f, ATTACK_SPEED = 0.1f;
+
+    // Character setup
+    sf::Sprite character;
+    float scale = 2.5f;
+    character.setScale(scale, scale);
+    character.setTexture(idleTexture);
+    
+    int frameHeight = idleTexture.getSize().y;
+    int idleWidth = idleTexture.getSize().x / IDLE_FRAMES;
+    character.setTextureRect(sf::IntRect(0, 0, idleWidth, frameHeight));
+
+    float charWidth = idleWidth * scale;
+    float charHeight = frameHeight * scale;
+    float groundY = window.getSize().y - charHeight - 20;
+    character.setPosition(window.getSize().x/2 - charWidth/2, groundY);
+
+    // Movement variables
+    float baseSpeed = 5.0f;
+    float jumpSpeed = -12.0f;
+    float gravity = 0.6f;
+    float verticalVelocity = 0.0f;
+    bool facingRight = true, isJumping = false, isAttacking = false;
+    bool isShielding = false;
+
+    enum Action { IDLE, RUN, JUMP, ATTACK1, ATTACK2, ATTACK3, SHIELD };
+    Action currentAction = IDLE;
+
+    int currentFrame = 0;
+    float animTime = 0;
+    sf::Clock animClock;
+    sf::Clock attackCooldownClock;
+    bool canAttack = true;
+
+    // Game UI
+    sf::RectangleShape healthBarBg(sf::Vector2f(300, 30));
+    healthBarBg.setFillColor(sf::Color(50,50,50));
+    healthBarBg.setPosition(30, 30);
+    
+    sf::RectangleShape healthBar(sf::Vector2f(300, 30));
+    healthBar.setFillColor(sf::Color::Green);
+    healthBar.setPosition(30, 30);
+    
+    sf::Text playerNameText("", font, 24);
+    playerNameText.setPosition(30, 70);
+
+    // Function to handle window resize
+    auto handleResize = [&]() {
+        sf::FloatRect visibleArea(0, 0, window.getSize().x, window.getSize().y);
+        window.setView(sf::View(visibleArea));
+
+        // Update menu background
+        menuBg.setScale(
+            window.getSize().x / menuBg.getLocalBounds().width,
+            window.getSize().y / menuBg.getLocalBounds().height
+        );
+
+        // Update game background
+        if (currentBackgroundFrames) {
+            background.setScale(
+                window.getSize().x / background.getLocalBounds().width,
+                window.getSize().y / background.getLocalBounds().height
+            );
+        }
+
+        // Update character position
+        groundY = window.getSize().y - charHeight - 20;
+        character.setPosition(character.getPosition().x, groundY);
+
+        // Update UI positions
+        healthBarBg.setPosition(30, 30);
+        healthBar.setPosition(30, 30);
+        playerNameText.setPosition(30, 70);
+
+        // Update map selection positions
+        mapPrompt.setPosition(window.getSize().x/2 - mapPrompt.getLocalBounds().width/2, 150);
+        map1Button.setPosition(window.getSize().x/2 - 350, 300);
+        map1Text.setPosition(map1Button.getPosition().x + 150 - map1Text.getLocalBounds().width/2, 
+                           map1Button.getPosition().y + 50 - map1Text.getLocalBounds().height/2);
+        map2Button.setPosition(window.getSize().x/2 + 50, 300);
+        map2Text.setPosition(map2Button.getPosition().x + 150 - map2Text.getLocalBounds().width/2, 
+                           map2Button.getPosition().y + 50 - map2Text.getLocalBounds().height/2);
+    };
+
+    // Main game loop
+    while (window.isOpen()) {
+        sf::Event event;
+        while (window.pollEvent(event)) {
+            if (event.type == sf::Event::Closed)
+                window.close();
+
+            // Handle window resize
+            if (event.type == sf::Event::Resized) {
+                handleResize();
+            }
+
+            // State machine
+            switch (currentState) {
+                case MENU:
+                    if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Enter) {
+                        currentState = NAME_INPUT;
+                        nameInputActive = true;
+                        cursorBlinkClock.restart();
+                    }
+                    break;
+                    
+                case NAME_INPUT:
+                    if (event.type == sf::Event::MouseButtonPressed) {
+                        sf::Vector2f mousePos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
+                        if (nameBox.getGlobalBounds().contains(mousePos)) {
+                            nameInputActive = true;
+                            cursorBlinkClock.restart();
+                        } else {
+                            nameInputActive = false;
+                        }
+                    }
+
+                    if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Enter) {
+                        if (!playerName.empty()) {
+                            currentState = MAP_SELECTION;
+                            playerNameText.setString("Player: " + playerName);
+                        }
+                    }
+                    else if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::Escape) {
+                        currentState = MENU;
+                        playerName.clear();
+                        nameText.setString("");
+                    }
+
+                    if (nameInputActive && event.type == sf::Event::TextEntered) {
+                        if (event.text.unicode == '\b') {
+                            if (!playerName.empty()) {
+                                playerName.pop_back();
+                            }
+                        } 
+                        else if (event.text.unicode < 128 && event.text.unicode != '\r' && event.text.unicode != '\n') {
+                            if (playerName.size() < 20) {
+                                playerName += static_cast<char>(event.text.unicode);
+                            }
+                        }
+                        nameText.setString(playerName);
+                        cursorBlinkClock.restart();
+                        showCursor = true;
+                    }
+                    break;
+                    
+                case MAP_SELECTION:
+                    if (event.type == sf::Event::MouseButtonPressed) {
+                        sf::Vector2f mousePos = window.mapPixelToCoords(sf::Mouse::getPosition(window));
+                        
+                        if (map1Button.getGlobalBounds().contains(mousePos)) {
+                            // Load Map 1 background
+                            map1Frames.clear();
+                            for (int i = 0; i < MAP1_FRAME_COUNT; ++i) {
+                                sf::Texture frame;
+                                std::string filename = "frame_" + std::to_string(i) + "_delay-0.11s.png";
+                                if (!frame.loadFromFile(filename)) {
+                                    std::cerr << "Failed to load background frame: " << filename << std::endl;
+                                    return -1;
+                                }
+                                map1Frames.push_back(frame);
+                            }
+                            currentBackgroundFrames = &map1Frames;
+                            currentMap = 1;
+                            background.setTexture(map1Frames[0]);
+                            currentState = GAME;
+                        }
+                        else if (map2Button.getGlobalBounds().contains(mousePos)) {
+                            // Load Map 2 background
+                            map2Frames.clear();
+                            for (int i = 0; i < MAP2_FRAME_COUNT; ++i) {
+                                sf::Texture frame;
+                                std::string filename = "bg1." + std::to_string(i+1) + ".png";
+                                if (!frame.loadFromFile(filename)) {
+                                    std::cerr << "Failed to load background frame: " << filename << std::endl;
+                                    return -1;
+                                }
+                                map2Frames.push_back(frame);
+                            }
+                            currentBackgroundFrames = &map2Frames;
+                            currentMap = 2;
+                            background.setTexture(map2Frames[0]);
+                            currentState = GAME;
+                        }
+                    }
+                    break;
+                    
+                case GAME:
+                    if (event.type == sf::Event::KeyPressed && event.key.code == sf::Keyboard::C) {
+                        isShielding = true;
+                        currentAction = SHIELD;
+                        currentFrame = 0;
+                        animTime = 0;
+                    }
+                    if (event.type == sf::Event::KeyReleased && event.key.code == sf::Keyboard::C) {
+                        isShielding = false;
+                        currentAction = IDLE;
+                        currentFrame = 0;
+                        animTime = 0;
+                    }
+                    break;
+            }
+        }
+
+        window.clear();
+
+        switch (currentState) {
+            case MENU: {
+                // Draw menu background
+                window.draw(menuBg);
+
+                // Animate title
+                float time = menuClock.getElapsedTime().asSeconds();
+                title.setPosition(window.getSize().x/2 - title.getLocalBounds().width/2, 
+                                150 + 10 * std::sin(time * 2));
+
+                // Pulsate start prompt
+                float pulse = 0.8f + 0.2f * std::sin(time * 3);
+                pressStart.setScale(pulse, pulse);
+                pressStart.setPosition(window.getSize().x/2 - pressStart.getLocalBounds().width/2, 400);
+
+                window.draw(title);
+                window.draw(pressStart);
+                break;
+            }
+                
+            case NAME_INPUT: {
+                window.draw(menuBg);
+                
+                // Handle cursor blinking
+                if (cursorBlinkClock.getElapsedTime().asSeconds() > 0.5f) {
+                    showCursor = !showCursor;
+                    cursorBlinkClock.restart();
+                }
+
+                namePrompt.setPosition(window.getSize().x/2 - namePrompt.getLocalBounds().width/2, 250);
+                nameBox.setPosition(window.getSize().x/2 - 250, 350);
+                nameText.setPosition(window.getSize().x/2 - 240, 360);
+                
+                window.draw(namePrompt);
+                window.draw(nameBox);
+                
+                // Draw name text with cursor if active
+                sf::Text displayText = nameText;
+                displayText.setString(playerName + (nameInputActive && showCursor ? "_" : ""));
+                window.draw(displayText);
+
+                // Show continue prompt if name isn't empty
+                if (!playerName.empty()) {
+                    continueText.setPosition(window.getSize().x/2 - continueText.getLocalBounds().width/2, 450);
+                    window.draw(continueText);
+                }
+                break;
+            }
+                
+            case MAP_SELECTION: {
+                window.draw(menuBg);
+                
+                mapPrompt.setPosition(window.getSize().x/2 - mapPrompt.getLocalBounds().width/2, 150);
+                map1Button.setPosition(window.getSize().x/2 - 350, 300);
+                map1Text.setPosition(map1Button.getPosition().x + 150 - map1Text.getLocalBounds().width/2, 
+                                   map1Button.getPosition().y + 50 - map1Text.getLocalBounds().height/2);
+                map2Button.setPosition(window.getSize().x/2 + 50, 300);
+                map2Text.setPosition(map2Button.getPosition().x + 150 - map2Text.getLocalBounds().width/2, 
+                                   map2Button.getPosition().y + 50 - map2Text.getLocalBounds().height/2);
+                
+                window.draw(mapPrompt);
+                window.draw(map1Button);
+                window.draw(map1Text);
+                window.draw(map2Button);
+                window.draw(map2Text);
+                break;
+            }
+                
+            case GAME: {
+                // Game logic
+                float deltaTime = animClock.restart().asSeconds();
+                
+                // Movement
+                bool isMoving = false;
+                if (!isAttacking) {
+                    if (sf::Keyboard::isKeyPressed(sf::Keyboard::Left)) {
+                        character.move(-baseSpeed, 0);
+                        isMoving = true;
+                        facingRight = false;
+                    }
+                    if (sf::Keyboard::isKeyPressed(sf::Keyboard::Right)) {
+                        character.move(baseSpeed, 0);
+                        isMoving = true;
+                        facingRight = true;
+                    }
+                    if (sf::Keyboard::isKeyPressed(sf::Keyboard::Space) && !isJumping) {
+                        isJumping = true;
+                        verticalVelocity = jumpSpeed;
+                    }
+                }
+
+                // Attacks
+                if (!canAttack && attackCooldownClock.getElapsedTime().asSeconds() > 0.5f) {
+                    canAttack = true;
+                }
+
+                if (canAttack && !isShielding) {
+                    if (sf::Keyboard::isKeyPressed(sf::Keyboard::X) && !isAttacking) {
+                        isAttacking = true;
+                        canAttack = false;
+                        currentAction = ATTACK1;
+                        currentFrame = 0;
+                        attackCooldownClock.restart();
+                    }
+                    else if (sf::Keyboard::isKeyPressed(sf::Keyboard::V) && !isAttacking) {
+                        isAttacking = true;
+                        canAttack = false;
+                        currentAction = ATTACK2;
+                        currentFrame = 0;
+                        attackCooldownClock.restart();
+                    }
+                    else if (sf::Keyboard::isKeyPressed(sf::Keyboard::Z) && !isAttacking) {
+                        isAttacking = true;
+                        canAttack = false;
+                        currentAction = ATTACK3;
+                        currentFrame = 0;
+                        attackCooldownClock.restart();
+                    }
+                }
+
+                // Jumping physics
+                if (isJumping) {
+                    character.move(0, verticalVelocity);
+                    verticalVelocity += gravity;
+                    if (character.getPosition().y >= groundY) {
+                        character.setPosition(character.getPosition().x, groundY);
+                        isJumping = false;
+                        verticalVelocity = 0;
+                    }
+                }
+
+                // Screen boundaries
+                sf::FloatRect bounds = character.getGlobalBounds();
+                if (bounds.left < 0) character.setPosition(0, character.getPosition().y);
+                if (bounds.left + bounds.width > window.getSize().x)
+                    character.setPosition(window.getSize().x - bounds.width, character.getPosition().y);
+
+                // Background animation
+                if (currentBackgroundFrames && !currentBackgroundFrames->empty()) {
+                    bgTimer += deltaTime;
+                    if (bgTimer >= FRAME_DELAY) {
+                        bgTimer = 0;
+                        bgFrame = (bgFrame + 1) % currentBackgroundFrames->size();
+                        background.setTexture((*currentBackgroundFrames)[bgFrame]);
+                    }
+                    background.setScale(
+                        window.getSize().x / background.getLocalBounds().width,
+                        window.getSize().y / background.getLocalBounds().height
+                    );
+                    window.draw(background);
+                }
+
+                // Animation updates
+                animTime += deltaTime;
+                int frameWidth = 0;
+                int textureHeight = frameHeight;
+
+                if (isShielding) {
+                    character.setTexture(shieldTexture);
+                    frameWidth = shieldTexture.getSize().x / SHIELD_FRAMES;
+                    
+                    if (animTime >= ATTACK_SPEED) {
+                        animTime = 0;
+                        currentFrame = (currentFrame + 1) % SHIELD_FRAMES;
+                    }
+                }
+                else if (isAttacking) {
+                    if (animTime >= ATTACK_SPEED) {
+                        animTime = 0;
+                        currentFrame++;
+                        if ((currentAction == ATTACK1 && currentFrame >= ATTACK1_FRAMES) ||
+                            (currentAction == ATTACK2 && currentFrame >= ATTACK2_FRAMES) ||
+                            (currentAction == ATTACK3 && currentFrame >= ATTACK3_FRAMES)) {
+                            isAttacking = false;
+                            currentAction = IDLE;
+                            currentFrame = 0;
+                        }
+                    }
+
+                    if (currentAction == ATTACK1) {
+                        character.setTexture(attack1Texture);
+                        frameWidth = attack1Texture.getSize().x / ATTACK1_FRAMES;
+                    }
+                    else if (currentAction == ATTACK2) {
+                        character.setTexture(attack2Texture);
+                        frameWidth = attack2Texture.getSize().x / ATTACK2_FRAMES;
+                    }
+                    else if (currentAction == ATTACK3) {
+                        character.setTexture(attack3Texture);
+                        frameWidth = attack3Texture.getSize().x / ATTACK3_FRAMES;
+                    }
+                }
+                else if (isJumping) {
+                    if (animTime >= JUMP_SPEED) {
+                        animTime = 0;
+                        currentFrame = (currentFrame + 1) % JUMP_FRAMES;
+                    }
+                    character.setTexture(jumpTexture);
+                    frameWidth = jumpTexture.getSize().x / JUMP_FRAMES;
+                }
+                else if (isMoving) {
+                    if (animTime >= RUN_SPEED) {
+                        animTime = 0;
+                        currentFrame = (currentFrame + 1) % RUN_FRAMES;
+                    }
+                    character.setTexture(runTexture);
+                    frameWidth = runTexture.getSize().x / RUN_FRAMES;
+                }
+                else {
+                    if (animTime >= IDLE_SPEED) {
+                        animTime = 0;
+                        currentFrame = (currentFrame + 1) % IDLE_FRAMES;
+                    }
+                    character.setTexture(idleTexture);
+                    frameWidth = idleTexture.getSize().x / IDLE_FRAMES;
+                }
+
+                character.setTextureRect(sf::IntRect(currentFrame * frameWidth, 0, frameWidth, textureHeight));
+                character.setScale(facingRight ? scale : -scale, scale);
+                character.setOrigin(facingRight ? 0 : character.getLocalBounds().width, 0);
+
+                window.draw(character);
+                window.draw(healthBarBg);
+                window.draw(healthBar);
+                window.draw(playerNameText);
+                break;
+            }
+        }
+
+        window.display();
+    }
+
+    return 0;
+}
